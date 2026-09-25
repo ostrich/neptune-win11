@@ -120,9 +120,15 @@ VM data is stored in `$XDG_DATA_HOME/neptune-win11`, or
 `~/.local/share/neptune-win11` when `XDG_DATA_HOME` is unset. Set
 `NEPTUNE_STATE_DIR` to use another location.
 
-The installer creates a dynamically allocated 128 GB qcow2 disk and saves the
-generated Windows login in `windows-credentials.txt` inside the state
-directory. The file is readable only by its owner.
+The default Windows login is:
+
+- Username: `neptune`
+- Password: `password`
+
+Change the password after the first boot if the VM is accessible to untrusted
+users. The installer also records the login in `windows-credentials.txt` under
+the state directory and creates a dynamically allocated 128 GB qcow2 disk
+alongside the other VM state.
 
 Useful overrides:
 

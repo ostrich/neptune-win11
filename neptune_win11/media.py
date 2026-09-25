@@ -4,7 +4,6 @@ import hashlib
 import os
 from pathlib import Path
 import re
-import secrets
 import shutil
 import subprocess
 import tempfile
@@ -20,6 +19,8 @@ GUEST_TOOLS_URL = (
 )
 GUEST_TOOLS_SHA256 = "7d2c0343e92358ad5e65078b08ec1dad873eb91b3c154aef60531bf6c2f04601"
 PRODUCT_KEY = "W269N-WFGWX-YVC9B-4J6C9-T83GX"
+DEFAULT_USERNAME = "neptune"
+DEFAULT_PASSWORD = "password"
 TEMPLATE_ROOT = Path("/opt/neptune/app/unattended")
 
 
@@ -90,7 +91,7 @@ def image_index(image: Path, edition: str = "Windows 11 Pro") -> int:
 def render_unattend(index: int, password: str) -> str:
     replacements = {
         "@@IMAGE_INDEX@@": str(index),
-        "@@USERNAME@@": "neptune",
+        "@@USERNAME@@": DEFAULT_USERNAME,
         "@@COMPUTER_NAME@@": "NEPTUNE-W11",
         "@@LOCALE@@": "en-US",
         "@@PRODUCT_KEY@@": PRODUCT_KEY,
@@ -133,15 +134,14 @@ def prepare_media(iso: Path, state_root: Path, state_file: Path) -> int:
     print(f"Windows edition: Windows 11 Pro (index {index})")
 
     credentials = state_root / "windows-credentials.txt"
-    if credentials.exists():
-        password = credentials.read_text(encoding="utf-8").split("password=", 1)[1].splitlines()[0]
-    else:
-        password = f"Npt-{secrets.token_hex(12)}A1!"
-        credentials.write_text(f"username=neptune\npassword={password}\n", encoding="utf-8")
-        os.chmod(credentials, 0o600)
+    credentials.write_text(
+        f"username={DEFAULT_USERNAME}\npassword={DEFAULT_PASSWORD}\n",
+        encoding="utf-8",
+    )
+    os.chmod(credentials, 0o600)
 
     seed = media / "unattend.img"
-    create_seed(seed, render_unattend(index, password))
+    create_seed(seed, render_unattend(index, DEFAULT_PASSWORD))
     download_guest_tools(media / "utm-guest-tools-0.1.273.iso")
     InstallState(phase="media-ready", detail=f"Windows 11 Pro index {index}").save(state_file)
     print(f"Unattended media: {seed}")

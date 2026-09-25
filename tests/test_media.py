@@ -26,10 +26,10 @@ Name: Windows 11 Home
     def test_renders_well_formed_unattend_file(self) -> None:
         template = Path(__file__).parents[1] / "unattended"
         with mock.patch.object(media, "TEMPLATE_ROOT", template):
-            rendered = media.render_unattend(6, "Npt-test-password-A1!")
+            rendered = media.render_unattend(6, media.DEFAULT_PASSWORD)
         self.assertNotIn("@@", rendered)
         self.assertIn("<Value>6</Value>", rendered)
-        self.assertIn("Npt-test-password-A1!", rendered)
+        self.assertIn("<Value>password</Value>", rendered)
 
 
 if __name__ == "__main__":
