@@ -16,6 +16,12 @@ provide.
 This is experimental software. It has reached the Windows desktop on AMD and
 NVIDIA hosts under Wayland, but expect rough edges.
 
+Credit to the contributors behind [UTM QEMU](https://github.com/utmapp/qemu),
+[UTM virglrenderer](https://github.com/utmapp/virglrenderer), and
+[osy/dxvk](https://github.com/osy/dxvk), and to [neuromaniacMD's Linux KVM
+report](https://github.com/utmapp/UTM/issues/7812) for documenting the AMD/RADV
+setup and Linux SPICE/GBM fix.
+
 ## Requirements
 
 - Linux x86-64 with KVM available to your user
