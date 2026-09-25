@@ -126,9 +126,8 @@ The default Windows login is:
 - Password: `password`
 
 Change the password after the first boot if the VM is accessible to untrusted
-users. The installer also records the login in `windows-credentials.txt` under
-the state directory and creates a dynamically allocated 128 GB qcow2 disk
-alongside the other VM state.
+users. The installer creates a dynamically allocated 128 GB qcow2 disk in the
+state directory.
 
 Useful overrides:
 

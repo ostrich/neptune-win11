@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from pathlib import Path
 import re
 import shutil
@@ -133,17 +132,9 @@ def prepare_media(iso: Path, state_root: Path, state_file: Path) -> int:
         index = image_index(extraction / archive)
     print(f"Windows edition: Windows 11 Pro (index {index})")
 
-    credentials = state_root / "windows-credentials.txt"
-    credentials.write_text(
-        f"username={DEFAULT_USERNAME}\npassword={DEFAULT_PASSWORD}\n",
-        encoding="utf-8",
-    )
-    os.chmod(credentials, 0o600)
-
     seed = media / "unattend.img"
     create_seed(seed, render_unattend(index, DEFAULT_PASSWORD))
     download_guest_tools(media / "utm-guest-tools-0.1.273.iso")
     InstallState(phase="media-ready", detail=f"Windows 11 Pro index {index}").save(state_file)
     print(f"Unattended media: {seed}")
-    print(f"Credentials: {credentials}")
     return 0
