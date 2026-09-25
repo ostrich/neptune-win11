@@ -1,0 +1,47 @@
+From 07ab849c80817aa0082c6ad7ff6eea58a4a777f6 Mon Sep 17 00:00:00 2001
+From: Neptune Patch Series <neptune@example.invalid>
+Date: Fri, 25 Sep 2026 16:13:36 +0000
+Subject: [PATCH 1/3] neptune: honor transport command framing
+
+---
+ src/neptune/npt_context.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/src/neptune/npt_context.c b/src/neptune/npt_context.c
+index f486e52a..31c2b8a3 100644
+--- a/src/neptune/npt_context.c
++++ b/src/neptune/npt_context.c
+@@ -728,6 +728,7 @@ npt_context_dispatch_one_command(struct npt_context *ctx,
+                                  struct npt_cs_decoder *dec,
+                                  struct npt_cs_encoder *enc)
+ {
++   const uint8_t *const command_start = dec->cur;
+    struct npt_command_header peek;
+    npt_cs_decoder_peek(dec, sizeof(peek), &peek, sizeof(peek));
+    if (npt_cs_decoder_get_fatal(dec))
+@@ -743,6 +744,23 @@ npt_context_dispatch_one_command(struct npt_context *ctx,
+          npt_cs_decoder_set_fatal(dec);
+          return false;
+       }
++      if (!npt_cs_decoder_get_fatal(dec)) {
++         const size_t available = (size_t)(dec->end - command_start);
++         const size_t consumed = (size_t)(dec->cur - command_start);
++
++         /* Transport commands are hand-written rather than generated.  Use
++          * the wire header as their framing boundary so a newer producer can
++          * append fields without making the extension look like another
++          * command to an older consumer. */
++         if (peek.cmd_size < consumed || peek.cmd_size > available) {
++            npt_log("invalid transport command size: type=0x%08x "
++                    "declared=%u consumed=%zu available=%zu",
++                    peek.cmd_type, peek.cmd_size, consumed, available);
++            npt_cs_decoder_set_fatal(dec);
++         } else {
++            dec->cur = command_start + peek.cmd_size;
++         }
++      }
+       /* A matched transport handler may still set fatal; the common
+        * tail check catches that. */
+    } else {
+-- 
+2.55.0

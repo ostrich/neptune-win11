@@ -1,0 +1,48 @@
+From c08ff54f5004e60d0ac991d2db305a4b2c4d521b Mon Sep 17 00:00:00 2001
+From: Neptune Patch Series <neptune@example.invalid>
+Date: Fri, 25 Sep 2026 16:13:36 +0000
+Subject: [PATCH] dxvk: support NVIDIA dma-buf scanout formats
+
+---
+ src/dxgi/dxgi_format.cpp | 9 +++++++++
+ src/dxvk/dxvk_image.cpp  | 1 +
+ 2 files changed, 10 insertions(+)
+
+diff --git a/src/dxgi/dxgi_format.cpp b/src/dxgi/dxgi_format.cpp
+index 527c1d7e..4e92117c 100644
+--- a/src/dxgi/dxgi_format.cpp
++++ b/src/dxgi/dxgi_format.cpp
+@@ -871,10 +871,19 @@ namespace dxvk {
+       RemapDepthFormat(DXGI_FORMAT_D24_UNORM_S8_UINT,     VK_FORMAT_D32_SFLOAT_S8_UINT);
+     }
+ 
++#ifndef _WIN32
++    // Neptune shares D3D11 textures between native renderer processes through
++    // dma-buf. NVIDIA exposes A8_UNORM for ordinary Vulkan images but no usable
++    // DRM modifier for external dma-buf images, which kills the render worker
++    // when DWM creates an alpha-only surface. R8_UNORM is byte-compatible and
++    // the existing component swizzle preserves DXGI's alpha-only semantics.
++    if (true) {
++#else
+     if (!CheckImageFormatSupport(device, VK_FORMAT_A8_UNORM_KHR,
+           VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
+           VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
+           VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {
++#endif
+       Logger::info("DXGI: VK_FORMAT_A8_UNORM_KHR -> VK_FORMAT_R8_UNORM");
+       RemapColorFormat(DXGI_FORMAT_A8_UNORM, VK_FORMAT_R8_UNORM, {
+           VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO,
+diff --git a/src/dxvk/dxvk_image.cpp b/src/dxvk/dxvk_image.cpp
+index 7fd7de71..c662ae32 100644
+--- a/src/dxvk/dxvk_image.cpp
++++ b/src/dxvk/dxvk_image.cpp
+@@ -846,6 +846,7 @@ namespace dxvk {
+       // plumbing) accept only DRM_FORMAT_MOD_LINEAR.
+       if (sharingInfo.mode == DxvkSharedHandleMode::Export
+        && sharingInfo.dmabufForceLinear
++       && device->adapter()->info().vendorId != uint32_t(DxvkGpuVendor::Nvidia)
+        && props.drmFormatModifier != 0u)
+         continue;
+ 
+-- 
+2.55.0

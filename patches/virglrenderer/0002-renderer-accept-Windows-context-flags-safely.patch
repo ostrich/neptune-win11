@@ -1,0 +1,159 @@
+From 91a1726abdf0af95ae57f8308477e0fb744f499c Mon Sep 17 00:00:00 2001
+From: Neptune Patch Series <neptune@example.invalid>
+Date: Fri, 25 Sep 2026 16:14:30 +0000
+Subject: [PATCH 2/3] renderer: accept Windows context flags safely
+
+---
+ server/render_socket.c     |  3 ++-
+ server/render_state.c      | 22 +++++++++++++++++++---
+ src/neptune/npt_renderer.c |  3 ++-
+ src/proxy/proxy_socket.c   |  3 ++-
+ src/venus/vkr_renderer.c   |  3 ++-
+ src/virglrenderer.c        |  3 ++-
+ src/virglrenderer.h        |  1 +
+ 7 files changed, 30 insertions(+), 8 deletions(-)
+
+diff --git a/server/render_socket.c b/server/render_socket.c
+index 464b24f6..fa6f8370 100644
+--- a/server/render_socket.c
++++ b/server/render_socket.c
+@@ -247,7 +247,8 @@ render_socket_receive_request_internal(struct render_socket *socket,
+       const int *received_fds = get_received_fds(&msg, &received_fd_count);
+       assert(received_fd_count <= max_fd_count);
+ 
+-      memcpy(fds, received_fds, sizeof(*fds) * received_fd_count);
++      if (received_fd_count)
++         memcpy(fds, received_fds, sizeof(*fds) * received_fd_count);
+       *out_fd_count = received_fd_count;
+    } else if (out_fd_count) {
+       *out_fd_count = 0;
+diff --git a/server/render_state.c b/server/render_state.c
+index 6a504ca7..9157d4f7 100644
+--- a/server/render_state.c
++++ b/server/render_state.c
+@@ -37,6 +37,12 @@ struct render_state {
+ 
+    /* track and init/fini just once */
+    int init_count;
++#ifdef ENABLE_VENUS
++   bool venus_initialized;
++#endif
++#ifdef ENABLE_NEPTUNE
++   bool neptune_initialized;
++#endif
+ 
+    /* track the render_context */
+    struct list_head contexts;
+@@ -156,10 +162,16 @@ render_state_fini(void)
+       state.init_count--;
+       if (!state.init_count) {
+ #ifdef ENABLE_VENUS
+-         vkr_renderer_fini();
++         if (state.venus_initialized) {
++            vkr_renderer_fini();
++            state.venus_initialized = false;
++         }
+ #endif
+ #ifdef ENABLE_NEPTUNE
+-         npt_renderer_fini();
++         if (state.neptune_initialized) {
++            npt_renderer_fini();
++            state.neptune_initialized = false;
++         }
+ #endif
+          virgl_fence_table_cleanup();
+       }
+@@ -199,18 +211,22 @@ render_state_init(uint32_t init_flags)
+             virgl_fence_table_cleanup();
+             return false;
+          }
++         state.venus_initialized = true;
+       }
+ #endif
+ #ifdef ENABLE_NEPTUNE
+       if (want_neptune) {
+          if (!npt_renderer_init(0, &render_state_npt_cbs)) {
+ #ifdef ENABLE_VENUS
+-            if (want_venus)
++            if (state.venus_initialized) {
+                vkr_renderer_fini();
++               state.venus_initialized = false;
++            }
+ #endif
+             virgl_fence_table_cleanup();
+             return false;
+          }
++         state.neptune_initialized = true;
+       }
+ #endif
+       list_inithead(&state.contexts);
+diff --git a/src/neptune/npt_renderer.c b/src/neptune/npt_renderer.c
+index 43f0c384..a44c51a5 100644
+--- a/src/neptune/npt_renderer.c
++++ b/src/neptune/npt_renderer.c
+@@ -102,7 +102,8 @@ npt_renderer_create_context(uint32_t ctx_id,
+                             const char *name)
+ {
+    assert(ctx_id);
+-   assert(!(ctx_flags & ~VIRGL_RENDERER_CONTEXT_FLAG_CAPSET_ID_MASK));
++   assert(!(ctx_flags & ~(VIRGL_RENDERER_CONTEXT_FLAG_CAPSET_ID_MASK |
++                          VIRGL_RENDERER_CONTEXT_FLAG_GLOBAL_RESOURCE_IDS)));
+ 
+    /* Defensive: the render-server dispatcher already routes by
+     * capset_id, but the renderer API is public so re-check. */
+diff --git a/src/proxy/proxy_socket.c b/src/proxy/proxy_socket.c
+index dd30b112..12113d72 100644
+--- a/src/proxy/proxy_socket.c
++++ b/src/proxy/proxy_socket.c
+@@ -256,7 +256,8 @@ proxy_socket_receive_reply_internal(struct proxy_socket *socket,
+       const int *received_fds = get_received_fds(&msg, &received_fd_count);
+       assert(received_fd_count <= max_fd_count);
+ 
+-      memcpy(fds, received_fds, sizeof(*fds) * received_fd_count);
++      if (received_fd_count)
++         memcpy(fds, received_fds, sizeof(*fds) * received_fd_count);
+       *out_fd_count = received_fd_count;
+    } else if (out_fd_count) {
+       *out_fd_count = 0;
+diff --git a/src/venus/vkr_renderer.c b/src/venus/vkr_renderer.c
+index c43a96e6..b965cae8 100644
+--- a/src/venus/vkr_renderer.c
++++ b/src/venus/vkr_renderer.c
+@@ -108,7 +108,8 @@ vkr_renderer_create_context(uint32_t ctx_id,
+    TRACE_FUNC();
+ 
+    assert(ctx_id);
+-   assert(!(ctx_flags & ~VIRGL_RENDERER_CONTEXT_FLAG_CAPSET_ID_MASK));
++   assert(!(ctx_flags & ~(VIRGL_RENDERER_CONTEXT_FLAG_CAPSET_ID_MASK |
++                          VIRGL_RENDERER_CONTEXT_FLAG_GLOBAL_RESOURCE_IDS)));
+ 
+    if ((ctx_flags & VIRGL_RENDERER_CONTEXT_FLAG_CAPSET_ID_MASK) !=
+        VIRTGPU_DRM_CAPSET_VENUS)
+diff --git a/src/virglrenderer.c b/src/virglrenderer.c
+index 1c4c95fb..b6b5bbb2 100644
+--- a/src/virglrenderer.c
++++ b/src/virglrenderer.c
+@@ -233,7 +233,8 @@ int virgl_renderer_context_create_with_flags(uint32_t ctx_id,
+       return EINVAL;
+ 
+    /* unsupported flags */
+-   if (ctx_flags & ~VIRGL_RENDERER_CONTEXT_FLAG_CAPSET_ID_MASK)
++   if (ctx_flags & ~(VIRGL_RENDERER_CONTEXT_FLAG_CAPSET_ID_MASK |
++                     VIRGL_RENDERER_CONTEXT_FLAG_GLOBAL_RESOURCE_IDS))
+       return EINVAL;
+ 
+    ctx = virgl_context_lookup(ctx_id);
+diff --git a/src/virglrenderer.h b/src/virglrenderer.h
+index e5f0efdf..9ebe298f 100644
+--- a/src/virglrenderer.h
++++ b/src/virglrenderer.h
+@@ -416,6 +416,7 @@ VIRGL_EXPORT int virgl_renderer_get_poll_fd(void);
+ VIRGL_EXPORT int virgl_renderer_execute(void *execute_args, uint32_t execute_size);
+ 
+ #define VIRGL_RENDERER_CONTEXT_FLAG_CAPSET_ID_MASK 0xff
++#define VIRGL_RENDERER_CONTEXT_FLAG_GLOBAL_RESOURCE_IDS (1u << 8)
+ 
+ VIRGL_EXPORT int virgl_renderer_context_create_with_flags(uint32_t ctx_id,
+                                                           uint32_t ctx_flags,
+-- 
+2.55.0

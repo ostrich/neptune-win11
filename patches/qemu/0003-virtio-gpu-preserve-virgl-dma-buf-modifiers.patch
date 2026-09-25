@@ -1,0 +1,82 @@
+From d7f14abae4f81a331ca1ea9b7a8ea50d1ea4a65b Mon Sep 17 00:00:00 2001
+From: Neptune Patch Series <neptune@example.invalid>
+Date: Fri, 25 Sep 2026 16:15:17 +0000
+Subject: [PATCH 3/3] virtio-gpu: preserve virgl dma-buf modifiers
+
+---
+ hw/display/virtio-gpu-udmabuf.c |  4 ++--
+ hw/display/virtio-gpu-virgl.c   | 12 ++++++++++++
+ include/hw/virtio/virtio-gpu.h  |  1 +
+ 3 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/hw/display/virtio-gpu-udmabuf.c b/hw/display/virtio-gpu-udmabuf.c
+index b4724da532..1201b74193 100644
+--- a/hw/display/virtio-gpu-udmabuf.c
++++ b/hw/display/virtio-gpu-udmabuf.c
+@@ -186,7 +186,8 @@ static VGPUDMABuf
+     dmabuf->buf = qemu_dmabuf_new(r->width, r->height, fb->stride,
+                                   r->x, r->y, fb->width, fb->height,
+                                   qemu_pixman_to_drm_format(fb->format),
+-                                  0, res->dmabuf_fd, true, false);
++                                  res->dmabuf_modifier, res->dmabuf_fd,
++                                  true, false);
+     dmabuf->scanout_id = scanout_id;
+     /* Remember the request identity so a later identical present can reuse
+      * this dmabuf + its EGL import instead of re-creating it. */
+@@ -266,4 +267,3 @@ int virtio_gpu_update_dmabuf(VirtIOGPU *g,
+ 
+     return 0;
+ }
+-
+diff --git a/hw/display/virtio-gpu-virgl.c b/hw/display/virtio-gpu-virgl.c
+index 2592fb4e77..329ea860e8 100644
+--- a/hw/display/virtio-gpu-virgl.c
++++ b/hw/display/virtio-gpu-virgl.c
+@@ -905,6 +905,9 @@ static void virgl_cmd_resource_create_blob(VirtIOGPU *g,
+     g_autofree struct virtio_gpu_virgl_resource *res = NULL;
+     struct virtio_gpu_resource_create_blob cblob;
+     struct virgl_renderer_resource_info info;
++#ifdef VIRGL_RENDERER_RESOURCE_INFO_EXT_VERSION
++    struct virgl_renderer_resource_info_ext info_ext;
++#endif
+     int ret;
+ 
+     if (!virtio_gpu_blob_enabled(g->parent_obj.conf)) {
+@@ -963,7 +966,13 @@ static void virgl_cmd_resource_create_blob(VirtIOGPU *g,
+         return;
+     }
+ 
++#ifdef VIRGL_RENDERER_RESOURCE_INFO_EXT_VERSION
++    memset(&info_ext, 0, sizeof(info_ext));
++    ret = virgl_renderer_resource_get_info_ext(cblob.resource_id, &info_ext);
++    info = info_ext.base;
++#else
+     ret = virgl_renderer_resource_get_info(cblob.resource_id, &info);
++#endif
+     if (ret) {
+         qemu_log_mask(LOG_GUEST_ERROR,
+                       "%s: resource does not have info %d: %s\n",
+@@ -975,6 +984,9 @@ static void virgl_cmd_resource_create_blob(VirtIOGPU *g,
+     }
+ 
+     res->base.dmabuf_fd = info.fd;
++#ifdef VIRGL_RENDERER_RESOURCE_INFO_EXT_VERSION
++    res->base.dmabuf_modifier = info_ext.modifiers;
++#endif
+ 
+     /* Now live, cleaned up in virtio_gpu_virgl_resource_unref */
+     QTAILQ_INSERT_HEAD(&g->reslist, &res->base, next);
+diff --git a/include/hw/virtio/virtio-gpu.h b/include/hw/virtio/virtio-gpu.h
+index b103a5682d..7434c4f27e 100644
+--- a/include/hw/virtio/virtio-gpu.h
++++ b/include/hw/virtio/virtio-gpu.h
+@@ -58,6 +58,7 @@ struct virtio_gpu_simple_resource {
+     uint64_t blob_size;
+     void *blob;
+     int dmabuf_fd;
++    uint64_t dmabuf_modifier;
+     uint8_t *remapped;
+ 
+     QTAILQ_ENTRY(virtio_gpu_simple_resource) next;
+-- 
+2.55.0

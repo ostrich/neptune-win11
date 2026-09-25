@@ -1,0 +1,266 @@
+From 14779b00489c53bb96347cb0b22dc9fe970c192d Mon Sep 17 00:00:00 2001
+From: Neptune Patch Series <neptune@example.invalid>
+Date: Fri, 25 Sep 2026 16:15:03 +0000
+Subject: [PATCH 3/3] neptune: preserve dma-buf modifiers across process
+ workers
+
+---
+ server/render_context.c    |  4 +++-
+ server/render_protocol.h   |  1 +
+ server/render_state.c      |  4 +++-
+ server/render_state.h      |  1 +
+ src/neptune/npt_context.c  |  5 ++++-
+ src/neptune/npt_context.h  |  4 +++-
+ src/neptune/npt_renderer.c |  4 +++-
+ src/neptune/npt_renderer.h |  3 ++-
+ src/neptune/npt_shared.c   |  2 +-
+ src/proxy/proxy_context.c  |  1 +
+ src/virgl_context.h        |  3 +++
+ src/virgl_resource.h       |  1 +
+ src/virglrenderer.c        | 10 ++++++++++
+ 13 files changed, 36 insertions(+), 7 deletions(-)
+
+diff --git a/server/render_context.c b/server/render_context.c
+index cc04ba18..a2ad8dbe 100644
+--- a/server/render_context.c
++++ b/server/render_context.c
+@@ -139,7 +139,9 @@ render_context_dispatch_create_resource(struct render_context *ctx,
+    int res_fd;
+    bool ok = render_state_create_resource(ctx->ctx_id, req->res_id, req->blob_id,
+                                           req->blob_size, req->blob_flags, &reply.fd_type,
+-                                          &res_fd, &reply.map_info, &reply.vulkan_info);
++                                          &res_fd, &reply.map_info,
++                                          &reply.drm_format_modifier,
++                                          &reply.vulkan_info);
+    if (!ok)
+       return render_socket_send_reply(&ctx->socket, &reply, sizeof(reply));
+ 
+diff --git a/server/render_protocol.h b/server/render_protocol.h
+index 8f3abd12..bde596ee 100644
+--- a/server/render_protocol.h
++++ b/server/render_protocol.h
+@@ -152,6 +152,7 @@ struct render_context_op_create_resource_request {
+ struct render_context_op_create_resource_reply {
+    enum virgl_resource_fd_type fd_type;
+    uint32_t map_info; /* VIRGL_RENDERER_MAP_* */
++   uint64_t drm_format_modifier;
+    /* vulkan_info is set if the fd_type is VIRGL_RESOURCE_FD_OPAQUE */
+    struct virgl_resource_vulkan_info vulkan_info;
+    /* followed by 1 fd if not VIRGL_RESOURCE_FD_INVALID */
+diff --git a/server/render_state.c b/server/render_state.c
+index 9157d4f7..bb4c8175 100644
+--- a/server/render_state.c
++++ b/server/render_state.c
+@@ -360,6 +360,7 @@ render_state_create_resource(uint32_t ctx_id,
+                              enum virgl_resource_fd_type *out_fd_type,
+                              int *out_res_fd,
+                              uint32_t *out_map_info,
++                             uint64_t *out_drm_format_modifier,
+                              struct virgl_resource_vulkan_info *out_vulkan_info)
+ {
+    struct render_context *ctx = render_state_lookup_context(ctx_id);
+@@ -370,6 +371,7 @@ render_state_create_resource(uint32_t ctx_id,
+    switch (ctx->backend) {
+ #ifdef ENABLE_VENUS
+    case RENDER_BACKEND_VENUS:
++      *out_drm_format_modifier = 0;
+       return vkr_renderer_create_resource(ctx_id, res_id, blob_id, blob_size, blob_flags,
+                                           out_fd_type, out_res_fd, out_map_info,
+                                           out_vulkan_info);
+@@ -378,7 +380,7 @@ render_state_create_resource(uint32_t ctx_id,
+    case RENDER_BACKEND_NEPTUNE:
+       return npt_renderer_create_resource(ctx_id, res_id, blob_id, blob_size,
+                                           blob_flags, out_fd_type, out_res_fd,
+-                                          out_map_info);
++                                          out_map_info, out_drm_format_modifier);
+ #endif
+    default:
+       return false;
+diff --git a/server/render_state.h b/server/render_state.h
+index 98de2722..3cc11510 100644
+--- a/server/render_state.h
++++ b/server/render_state.h
+@@ -41,6 +41,7 @@ render_state_create_resource(uint32_t ctx_id,
+                              enum virgl_resource_fd_type *out_fd_type,
+                              int *out_res_fd,
+                              uint32_t *out_map_info,
++                             uint64_t *out_drm_format_modifier,
+                              struct virgl_resource_vulkan_info *out_vulkan_info);
+ 
+ bool
+diff --git a/src/neptune/npt_context.c b/src/neptune/npt_context.c
+index 31c2b8a3..179d7b41 100644
+--- a/src/neptune/npt_context.c
++++ b/src/neptune/npt_context.c
+@@ -944,6 +944,7 @@ npt_context_create_resource(struct npt_context *ctx,
+          .type = pb->fd_type,
+          .u.fd = pb->fd,
+          .map_info = 0,
++         .drm_format_modifier = pb->drm_format_modifier,
+       };
+       free(pb);
+ 
+@@ -956,7 +957,8 @@ npt_context_register_pending_blob(struct npt_context *ctx,
+                                   uint64_t blob_id,
+                                   enum virgl_resource_fd_type fd_type,
+                                   int fd,
+-                                  uint64_t size)
++                                  uint64_t size,
++                                  uint64_t drm_format_modifier)
+ {
+    struct npt_pending_blob *pb = calloc(1, sizeof(*pb));
+    if (!pb)
+@@ -966,6 +968,7 @@ npt_context_register_pending_blob(struct npt_context *ctx,
+    pb->fd_type = fd_type;
+    pb->fd = fd;
+    pb->size = size;
++   pb->drm_format_modifier = drm_format_modifier;
+ 
+    mtx_lock(&ctx->pending_blob_mutex);
+    _mesa_hash_table_insert(ctx->pending_blob_table, &pb->blob_id, pb);
+diff --git a/src/neptune/npt_context.h b/src/neptune/npt_context.h
+index 5096a996..e13c4ddc 100644
+--- a/src/neptune/npt_context.h
++++ b/src/neptune/npt_context.h
+@@ -24,6 +24,7 @@ struct npt_pending_blob {
+    enum virgl_resource_fd_type fd_type;
+    int fd;
+    uint64_t size;
++   uint64_t drm_format_modifier;
+ };
+ 
+ /* Sync Map/Unmap bookkeeping.  Keyed by (resource_id, subresource):
+@@ -232,7 +233,8 @@ npt_context_register_pending_blob(struct npt_context *ctx,
+                                   uint64_t blob_id,
+                                   enum virgl_resource_fd_type fd_type,
+                                   int fd,
+-                                  uint64_t size);
++                                  uint64_t size,
++                                  uint64_t drm_format_modifier);
+ 
+ /* Wake any wait_ring waiter on \p ring_id whose target seqno is
+  * reached.  Called after each dispatched command. */
+diff --git a/src/neptune/npt_renderer.c b/src/neptune/npt_renderer.c
+index a44c51a5..71fef17e 100644
+--- a/src/neptune/npt_renderer.c
++++ b/src/neptune/npt_renderer.c
+@@ -180,7 +180,8 @@ npt_renderer_create_resource(uint32_t ctx_id,
+                              uint32_t blob_flags,
+                              enum virgl_resource_fd_type *out_fd_type,
+                              int *out_res_fd,
+-                             uint32_t *out_map_info)
++                             uint32_t *out_map_info,
++                             uint64_t *out_drm_format_modifier)
+ {
+    struct npt_context *ctx = npt_renderer_lookup_context(ctx_id);
+    if (!ctx)
+@@ -193,6 +194,7 @@ npt_renderer_create_resource(uint32_t ctx_id,
+    *out_fd_type = blob.type;
+    *out_res_fd = blob.u.fd;
+    *out_map_info = blob.map_info;
++   *out_drm_format_modifier = blob.drm_format_modifier;
+ 
+    return true;
+ }
+diff --git a/src/neptune/npt_renderer.h b/src/neptune/npt_renderer.h
+index ba275d97..31f282aa 100644
+--- a/src/neptune/npt_renderer.h
++++ b/src/neptune/npt_renderer.h
+@@ -70,7 +70,8 @@ npt_renderer_create_resource(uint32_t ctx_id,
+                              uint32_t blob_flags,
+                              enum virgl_resource_fd_type *out_fd_type,
+                              int *out_res_fd,
+-                             uint32_t *out_map_info);
++                             uint32_t *out_map_info,
++                             uint64_t *out_drm_format_modifier);
+ 
+ bool
+ npt_renderer_import_resource(uint32_t ctx_id,
+diff --git a/src/neptune/npt_shared.c b/src/neptune/npt_shared.c
+index b90a224c..a03b58b9 100644
+--- a/src/neptune/npt_shared.c
++++ b/src/neptune/npt_shared.c
+@@ -181,7 +181,7 @@ npt_shared_export_blob(struct npt_context *ctx, uint64_t texture_id,
+    }
+    if (!npt_context_register_pending_blob(ctx, blob_id,
+                                           NPT_SHARED_FD_TYPE, fd,
+-                                          export_size)) {
++                                          export_size, info.modifier)) {
+       close(fd);
+       return NPT_E_FAIL;
+    }
+diff --git a/src/proxy/proxy_context.c b/src/proxy/proxy_context.c
+index eef67b57..ef0383a0 100644
+--- a/src/proxy/proxy_context.c
++++ b/src/proxy/proxy_context.c
+@@ -429,6 +429,7 @@ proxy_context_get_blob(struct virgl_context *base,
+    blob->type = reply.fd_type;
+    blob->u.fd = reply_fd;
+    blob->map_info = reply.map_info;
++   blob->drm_format_modifier = reply.drm_format_modifier;
+ 
+    if (reply.fd_type == VIRGL_RESOURCE_FD_OPAQUE)
+       blob->vulkan_info = reply.vulkan_info;
+diff --git a/src/virgl_context.h b/src/virgl_context.h
+index 25bc1060..b98678d0 100644
+--- a/src/virgl_context.h
++++ b/src/virgl_context.h
+@@ -48,6 +48,9 @@ struct virgl_context_blob {
+ 
+    uint32_t map_info;
+ 
++   /* Layout of a dma-buf blob, when known to the renderer context. */
++   uint64_t drm_format_modifier;
++
+    struct virgl_resource_vulkan_info vulkan_info;
+ };
+ 
+diff --git a/src/virgl_resource.h b/src/virgl_resource.h
+index 8eb770e7..2a150264 100644
+--- a/src/virgl_resource.h
++++ b/src/virgl_resource.h
+@@ -98,6 +98,7 @@ struct virgl_resource {
+    int iov_count;
+ 
+    uint32_t map_info;
++   uint64_t drm_format_modifier;
+ 
+    uint64_t map_size;
+    void *mapped;
+diff --git a/src/virglrenderer.c b/src/virglrenderer.c
+index b6b5bbb2..a6375240 100644
+--- a/src/virglrenderer.c
++++ b/src/virglrenderer.c
+@@ -567,6 +567,7 @@ int virgl_renderer_resource_get_info_ext(int res_handle,
+ {
+    TRACE_FUNC();
+    int ret;
++   struct virgl_resource *res = virgl_resource_lookup(res_handle);
+ 
+    if ((ret = virgl_renderer_resource_get_info_common(res_handle,
+                                                       &info_ext->base,
+@@ -576,6 +577,14 @@ int virgl_renderer_resource_get_info_ext(int res_handle,
+ 
+    info_ext->version = VIRGL_RENDERER_RESOURCE_INFO_EXT_VERSION;
+ 
++   if (res && !res->pipe_resource &&
++       res->fd_type == VIRGL_RESOURCE_FD_DMABUF) {
++      info_ext->has_dmabuf_export = true;
++      info_ext->planes = 1;
++      info_ext->modifiers = res->drm_format_modifier;
++      return 0;
++   }
++
+    if (state.winsys_initialized) {
+       return vrend_winsys_get_attrs_for_texture(info_ext->base.tex_id,
+                                                 info_ext->base.virgl_format,
+@@ -1259,6 +1268,7 @@ int virgl_renderer_resource_create_blob(const struct virgl_renderer_resource_cre
+    }
+ 
+    res->map_info = blob.map_info;
++   res->drm_format_modifier = blob.drm_format_modifier;
+    res->map_size = args->size;
+ 
+    return 0;
+-- 
+2.55.0

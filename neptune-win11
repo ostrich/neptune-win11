@@ -1,0 +1,192 @@
+#!/bin/sh
+set -eu
+
+project_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+image=${NEPTUNE_IMAGE:-localhost/neptune-win11:dev}
+data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
+state_dir=${NEPTUNE_STATE_DIR:-"$data_home/neptune-win11"}
+cdi_dir="$state_dir/cdi"
+container_name=${NEPTUNE_CONTAINER_NAME:-neptune-win11-vm}
+
+die() {
+    printf 'neptune-win11: %s\n' "$*" >&2
+    exit 1
+}
+
+need() {
+    command -v "$1" >/dev/null 2>&1 || die "$1 is required but was not found"
+}
+
+render_node() {
+    for node in /dev/dri/renderD*; do
+        if [ -r "$node" ] && [ -w "$node" ]; then
+            printf '%s\n' "$node"
+            return 0
+        fi
+    done
+    return 1
+}
+
+host_doctor() {
+    need podman
+    printf 'Podman: %s\n' "$(podman --version)"
+    rootless=$(podman info --format '{{.Host.Security.Rootless}}')
+    [ "$rootless" = true ] || die 'Podman is not running rootless'
+    printf 'OCI runtime: %s\n' "$(podman info --format '{{.Host.OCIRuntime.Name}}')"
+
+    [ -r /dev/kvm ] && [ -w /dev/kvm ] || die '/dev/kvm is not accessible'
+    printf 'KVM: usable\n'
+    node=$(render_node) || die 'no accessible DRM render node was found'
+    printf 'Render node: %s\n' "$node"
+
+    if [ -e /dev/nvidiactl ]; then
+        need nvidia-ctk
+        printf 'GPU integration: NVIDIA CDI\n'
+    else
+        printf 'GPU integration: direct DRM device\n'
+    fi
+}
+
+prepare_cdi() {
+    [ -e /dev/nvidiactl ] || return 0
+    need nvidia-ctk
+    mkdir -p "$cdi_dir"
+    nvidia-ctk --quiet cdi generate --output="$cdi_dir/nvidia.yaml"
+}
+
+image_exists() {
+    podman image exists "$image"
+}
+
+run_container() {
+    container_command=$1
+    shift
+    iso_path=${1:-}
+    [ "$#" -le 1 ] || die 'too many container command arguments'
+    prepare_cdi
+    mkdir -p "$state_dir"
+
+    set -- podman
+    if [ -e /dev/nvidiactl ]; then
+        set -- "$@" --cdi-spec-dir "$cdi_dir"
+    fi
+    if [ "$container_command" = start ]; then
+        set -- "$@" run --rm --replace --name "$container_name" \
+            --security-opt label=disable --device /dev/kvm
+    else
+        set -- "$@" run --rm --security-opt label=disable --device /dev/kvm
+    fi
+    if [ -e /dev/nvidiactl ]; then
+        set -- "$@" --device nvidia.com/gpu=all
+    else
+        set -- "$@" --device /dev/dri
+    fi
+    if [ -e /dev/udmabuf ]; then
+        set -- "$@" --device /dev/udmabuf
+    fi
+    set -- "$@" -v "$state_dir:/var/lib/neptune:rw"
+    if [ -n "$iso_path" ]; then
+        set -- "$@" -v "$iso_path:/mnt/windows.iso:ro"
+    fi
+    if [ "$container_command" = start ] && [ -n "${XDG_RUNTIME_DIR:-}" ] && \
+       [ -d "$XDG_RUNTIME_DIR" ]; then
+        set -- "$@" -e XDG_RUNTIME_DIR=/run/user/host \
+            -e WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+            -e DISPLAY="${DISPLAY:-}" \
+            -v "$XDG_RUNTIME_DIR:/run/user/host:rw"
+    fi
+    set -- "$@" "$image" python -m neptune_win11 "$container_command"
+    if [ -n "$iso_path" ]; then
+        set -- "$@" --iso /mnt/windows.iso
+    fi
+    exec "$@"
+}
+
+usage() {
+    cat <<'EOF'
+Usage: neptune-win11 COMMAND
+
+Commands:
+  doctor            Validate the host without changing it
+  build             Build the pinned Neptune container image
+  container-doctor  Validate KVM, Vulkan and the Neptune stack in the image
+  prepare ISO        Validate the ISO and create unattended installation media
+  install ISO        Perform the unattended Windows installation
+  start              Run the installed VM with Neptune acceleration
+  stop               Stop the running VM container
+  status            Show persistent installer state
+EOF
+}
+
+command=${1:-}
+case "$command" in
+    doctor)
+        host_doctor
+        ;;
+    build)
+        need podman
+        exec podman build --pull=newer -t "$image" "$project_dir"
+        ;;
+    container-doctor)
+        host_doctor
+        image_exists || die "container image $image has not been built; run '$0 build'"
+        shift
+        run_container doctor "$@"
+        ;;
+    prepare)
+        host_doctor
+        image_exists || die "container image $image has not been built; run '$0 build'"
+        [ "$#" -eq 2 ] || die 'usage: neptune-win11 prepare /path/to/windows.iso'
+        iso_path=$(realpath "$2")
+        [ -r "$iso_path" ] || die "Windows ISO is not readable: $iso_path"
+        run_container prepare "$iso_path"
+        ;;
+    install)
+        host_doctor
+        image_exists || die "container image $image has not been built; run '$0 build'"
+        [ "$#" -eq 2 ] || die 'usage: neptune-win11 install /path/to/windows.iso'
+        iso_path=$(realpath "$2")
+        [ -r "$iso_path" ] || die "Windows ISO is not readable: $iso_path"
+        run_container install "$iso_path"
+        ;;
+    start)
+        host_doctor
+        image_exists || die "container image $image has not been built; run '$0 build'"
+        shift
+        run_container start "$@"
+        ;;
+    stop)
+        need podman
+        if podman container exists "$container_name"; then
+            podman exec "$container_name" \
+                python -m neptune_win11 shutdown || true
+            wait_count=0
+            while podman container exists "$container_name" && \
+                  [ "$wait_count" -lt 90 ]; do
+                sleep 1
+                wait_count=$((wait_count + 1))
+            done
+            if podman container exists "$container_name"; then
+                printf 'Guest did not shut down within 90 seconds; stopping the container.\n' >&2
+                podman stop --time 20 "$container_name"
+            else
+                printf 'VM shut down cleanly.\n'
+            fi
+        else
+            printf 'VM container is not running.\n'
+        fi
+        ;;
+    status)
+        need podman
+        image_exists || die "container image $image has not been built; run '$0 build'"
+        shift
+        run_container status "$@"
+        ;;
+    -h|--help|help|'')
+        usage
+        ;;
+    *)
+        usage >&2
+        die "unknown command: $command"
+        ;;
+esac
