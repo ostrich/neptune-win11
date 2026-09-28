@@ -55,7 +55,94 @@ prepare_cdi() {
 }
 
 image_exists() {
-    podman image exists "$image"
+    if podman image exists "$image"; then
+        return 0
+    else
+        result=$?
+        [ "$result" -eq 1 ] || die "could not check image $image"
+        return 1
+    fi
+}
+
+container_exists() {
+    if podman container exists "$container_name"; then
+        return 0
+    else
+        result=$?
+        [ "$result" -eq 1 ] || die "could not check container $container_name"
+        return 1
+    fi
+}
+
+clean_state_path() {
+    need realpath
+    [ ! -L "$state_dir" ] || die "refusing symlinked state directory: $state_dir"
+    clean_path=$(realpath -m -- "$state_dir")
+    home_path=$(realpath -m -- "$HOME")
+    data_path=$(realpath -m -- "$data_home")
+    case "$clean_path" in
+        /|/tmp|/var|/usr|/etc|/opt|/dev|/proc|/sys|/run|\
+        "$home_path"|"$data_path"|"$project_dir"|"$project_dir"/*)
+            die "refusing unsafe state directory: $clean_path" ;;
+    esac
+    case "$home_path" in
+        "$clean_path"/*) die "refusing unsafe state directory: $clean_path" ;;
+    esac
+    case "$project_dir" in
+        "$clean_path"/*) die "refusing unsafe state directory: $clean_path" ;;
+    esac
+}
+
+clean_resources() {
+    [ "$#" -eq 0 ] || die 'usage: neptune-win11 clean'
+    need podman
+    clean_state_path
+    printf 'This will permanently remove:\n'
+    printf '  Podman container: %s\n' "$container_name"
+    printf '  Podman image: %s\n' "$image"
+    printf '  VM data and generated files: %s\n' "$clean_path"
+    printf 'Type clean to confirm: ' >&2
+    if ! IFS= read -r answer </dev/tty; then
+        die 'confirmation requires a terminal; nothing was removed'
+    fi
+    [ "$answer" = clean ] || die 'cleanup cancelled; nothing was removed'
+
+    if container_exists; then
+        running=$(podman container inspect --format '{{.State.Running}}' "$container_name") \
+            || die "could not inspect container $container_name"
+        if [ "$running" = true ]; then
+            podman exec "$container_name" python -m neptune_win11 shutdown || true
+            wait_count=0
+            while container_exists && [ "$wait_count" -lt 90 ]; do
+                running=$(podman container inspect --format '{{.State.Running}}' "$container_name") \
+                    || die "could not inspect container $container_name"
+                [ "$running" = true ] || break
+                sleep 1
+                wait_count=$((wait_count + 1))
+            done
+            if container_exists; then
+                running=$(podman container inspect --format '{{.State.Running}}' "$container_name") \
+                    || die "could not inspect container $container_name"
+                if [ "$running" = true ]; then
+                    printf 'Guest did not shut down within 90 seconds; stopping the container.\n' >&2
+                    podman stop --time 20 "$container_name" \
+                        || die "could not stop container $container_name"
+                fi
+            fi
+        fi
+        if container_exists; then
+            podman rm "$container_name" || die "could not remove container $container_name"
+        fi
+    fi
+    if image_exists; then
+        podman image rm "$image" || die "could not remove image $image"
+    fi
+    if [ -e "$clean_path" ] || [ -L "$clean_path" ]; then
+        [ ! -L "$clean_path" ] || die "state directory became a symlink: $clean_path"
+        [ -d "$clean_path" ] || die "state path is not a directory: $clean_path"
+        rm -rf -- "$clean_path"
+    fi
+    printf 'Neptune resources removed.\n'
 }
 
 run_container() {
@@ -115,6 +202,7 @@ Commands:
   start              Run the installed VM with Neptune acceleration
   stop               Stop the running VM container
   status            Show persistent installer state
+  clean             Remove the VM, container and image after confirmation
 EOF
 }
 
@@ -181,6 +269,10 @@ case "$command" in
         image_exists || die "container image $image has not been built; run '$0 build'"
         shift
         run_container status "$@"
+        ;;
+    clean)
+        shift
+        clean_resources "$@"
         ;;
     -h|--help|help|'')
         usage

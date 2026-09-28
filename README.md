@@ -114,6 +114,14 @@ Use another terminal to check its state or request a clean shutdown:
 ./neptune-win11 stop
 ```
 
+To remove the VM and start over, run `./neptune-win11 clean`. It shows the
+container, image, and state directory, then requires you to type `clean` in a
+terminal. This permanently deletes the Windows disk, TPM state, generated
+media, logs, the named Podman container, and the named image. It leaves the
+Windows ISO you supplied and Podman's shared build cache and base images
+alone. Set the same `NEPTUNE_STATE_DIR`, `NEPTUNE_CONTAINER_NAME`, and
+`NEPTUNE_IMAGE` overrides used to create the VM when cleaning it.
+
 ## Data and configuration
 
 VM data is stored in `$XDG_DATA_HOME/neptune-win11`, or
